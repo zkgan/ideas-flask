@@ -5,12 +5,17 @@ from flask import Flask, request
 from mongokit import Document
 from flask.ext.pymongo import PyMongo
 import datetime
+from simserver import SessionServer
+from gensim import utils
+import itertools
 
 app = Flask(__name__)
 app.config['MONGO_HOST'] = 'localhost'
-#app.config['MONGO_PORT'] = 3001
-#app.config['MONGO_DBNAME'] = 'meteor'
+app.config['MONGO_PORT'] = 3001
+app.config['MONGO_DBNAME'] = 'meteor'
 mongo = PyMongo(app)
+
+sim_server = SessionServer('/tmp/idea_match_server')
 
 class Idea(Document):
     structure = {
@@ -19,28 +24,34 @@ class Idea(Document):
         'date_created': datetime.datetime,
         'status': int, # open, pending, rejected, filled
         'suggested_relations': [],
-        'related_ideas': {},
+        'relations': {},
     }
     required_fields = ['text', 'parent_id', 'date_created', 'status']
     default_values = {'text': u'', 'parent_id': u'', 'date_created': datetime.datetime.utcnow, 'status': 0}
 
 class Relation(Document):
     structure = {
-        #'_id': unicode,
-        'text': unicode,
-        'source_id': unicode,
-        'target_id': unicode,
+#        'text': unicode,
+#        'source_id': unicode,
+#        'targetIdea': unicode,
         'weight': float,
-        'manmade': bool,
+#        'manmade': bool,
         'confirms': int,
         'denies': int,
+        'reviewed': bool,
     }
-    required_fields = ['text']
-    default_values = {'confirms': 0, 'denies': 0}
+#    required_fields = ['targetIdea', 'weight']
+    default_values = {'confirms': 0, 'denies': 0, 'reviewed': False}
 
 @app.route("/")
-def show_entries():
-    return ' ,'.join(mongo.cx.database_names())
+def init_sim_server():
+    cursor = mongo.db.ideas.find({})
+    corpus = [{'id': idea['_id'], 'tokens': utils.simple_preprocess(idea['text'])} for idea in cursor]
+    utils.upload_chunked(sim_server, corpus, chunksize=1000)
+    sim_server.train(corpus, method='lsi')
+    sim_server.index(corpus)
+    return 'Updated similarity server.'
+
 # create read update delete
 @app.route("/create_idea")
 def create_idea():
@@ -53,8 +64,7 @@ def create_idea():
     entry['text'] = text
     entry['parent_id'] = parent_id
     entry['status'] = status
-    ideas = mongo.db.ideas
-    idea_id = ideas.insert(entry)
+    idea_id = mongo.db.ideas.insert(entry)
 
     return text #'Done'
 
@@ -63,33 +73,84 @@ def delete_idea():
     idea_id = request.args.get("idea_id")
     if idea_id == None:
         return "Must specify idea_id to delete"
-    mongo.db.relations.find_and_modify(
+    mongo.db.ideas.find_and_modify(
         query = {"_id": ObjectId(idea_id)},
         remove = True
     )
     return "Object deleted."
     
-
 @app.route("/read_ideas")
 def read_ideas():
+    idea_id = request.args.get("idea_id")
     text = request.args.get("text")
-    if text == None:
-        cursor = mongo.db.ideas.find({})
+    print idea_id
+    if idea_id:
+        cursor = mongo.db.ideas.find({"_id": idea_id})
     else:
-        cursor = mongo.db.ideas.find({"text": text})
+        if text == None:
+            cursor = mongo.db.ideas.find({})
+        else:
+            cursor = mongo.db.ideas.find({"text": text})
     return multipleToJson(cursor)
 
-@app.route("/add_suggested_relation") #args: idea_id, relation_id
-def add_suggested_relation():
+def compute_relations(idea_id): # Computes relations for idea specified by idea_id
+    # Now we have a working sim_server, find similar ideas!
+    matches = sim_server.find_similar(idea_id)
+    matched_ideas = []
+    for match in matches:
+        match_id = match[0]
+        match_score = match[1]
+        if match_id != idea_id:
+            relation = Relation()
+#            relation['targetId'] = match_id
+            relation['weight'] = match_score
+#            matched_ideas.append(relation)
+            matched_ideas.append((match_id, relation))
+    #result = itertools.chain.from_iterable(matched_ideas)
+    #return multipleToJson(result)
+    return matched_ideas
+
+@app.route("/add_suggested_relations") # Computes and adds computed relations to idea. args: idea_id
+def add_suggested_relations():
     idea_id = request.args.get("idea_id")
-    relation_id = request.args.get("relation_id")
-    idea = mongo.db.ideas.find_and_modify(
-        query = {"_id": ObjectId(idea_id)},
-        update = {"$addToSet": {"suggested_relations": relation_id}},
-        new = True
-    )
+    if idea_id == None:
+        return "Must provide idea id to find relations!"
+    idea = _add_suggested_relations(idea_id)
     return toJson(idea)
 
+@app.route("/add_all_suggested_relations") # Computes and adds computed relations to all ideas.
+def add_all_suggested_relations():
+    all_ideas = mongo.db.ideas.find({})
+    for idea in all_ideas:
+        idea_id = idea["_id"]
+        _add_suggested_relations(idea_id)
+    return multipleToJson(all_ideas)
+
+def _add_suggested_relations(idea_id):
+    matched_ideas = compute_relations(idea_id)
+#    idea = mongo.db.ideas.find_and_modify(
+#        query = {"_id": idea_id},
+#        update = {"$addToSet": {"relations": matched_ideas}},
+#        new = True
+#    )
+    idea = mongo.db.ideas.find_one({"_id": idea_id})
+    if "relations" in idea:
+        relations = idea["relations"]
+    else:
+        relations = {}
+    idea_is_updated = False
+    for match_id, relation in matched_ideas:
+        if match_id not in relations:
+            relations[match_id] = relation
+            idea_is_updated = True
+    if idea_is_updated:
+        #mongo.db.ideas.update({"_id": idea_id}, {"$set": {"relations": relations}})
+        idea = mongo.db.ideas.find_and_modify(
+            query = {"_id": idea_id},
+            update = {"$set": {"relations": relations}},
+            new = True
+        )
+    return idea
 
 @app.route("/read_relations")
 def read_relations():
@@ -98,7 +159,10 @@ def read_relations():
         cursor = mongo.db.relations.find({})
     else:
         cursor = mongo.db.relations.find({"_id": ObjectId(relation_id)})
-    return multipleToJson(cursor)
+    resp = Response(response=multipleToJson(cursor),
+                    status=200,
+                    mimetype="application/json")
+    return resp
 
 @app.route("/create_relation") #arguments: text, strength, source, target, manmade
 def create_relation():
