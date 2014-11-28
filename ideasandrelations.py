@@ -8,6 +8,16 @@ import datetime
 from simserver import SessionServer
 from gensim import utils
 import itertools
+from pymongo import MongoClient
+
+sim_server = SessionServer('./tmp/idea_match_server')
+client = MongoClient('localhost', 3001)
+db = client.meteor
+cursor = db.ideas.find({})
+corpus = [{'id': idea['_id'], 'tokens': utils.simple_preprocess(idea['text'])} for idea in cursor]
+utils.upload_chunked(sim_server, corpus, chunksize=1000)
+sim_server.train(corpus, method='lsi')
+sim_server.index(corpus)
 
 app = Flask(__name__)
 app.config['MONGO_HOST'] = 'localhost'
@@ -15,7 +25,6 @@ app.config['MONGO_PORT'] = 3001
 app.config['MONGO_DBNAME'] = 'meteor'
 mongo = PyMongo(app)
 
-sim_server = SessionServer('/tmp/idea_match_server')
 
 class Idea(Document):
     structure = {
@@ -31,8 +40,6 @@ class Idea(Document):
 
 class Relation(Document):
     structure = {
-#        'text': unicode,
-#        'source_id': unicode,
 #        'targetIdea': unicode,
         'weight': float,
 #        'manmade': bool,
@@ -45,12 +52,7 @@ class Relation(Document):
 
 @app.route("/")
 def init_sim_server():
-    cursor = mongo.db.ideas.find({})
-    corpus = [{'id': idea['_id'], 'tokens': utils.simple_preprocess(idea['text'])} for idea in cursor]
-    utils.upload_chunked(sim_server, corpus, chunksize=1000)
-    sim_server.train(corpus, method='lsi')
-    sim_server.index(corpus)
-    return 'Updated similarity server.'
+    return ''
 
 # create read update delete
 @app.route("/create_idea")
@@ -74,7 +76,7 @@ def delete_idea():
     if idea_id == None:
         return "Must specify idea_id to delete"
     mongo.db.ideas.find_and_modify(
-        query = {"_id": ObjectId(idea_id)},
+        query = {"_id": idea_id},
         remove = True
     )
     return "Object deleted."
@@ -95,16 +97,14 @@ def read_ideas():
 
 def compute_relations(idea_id): # Computes relations for idea specified by idea_id
     # Now we have a working sim_server, find similar ideas!
-    matches = sim_server.find_similar(idea_id)
+    matches = sim_server.find_similar(idea_id, min_score = 0.09)
     matched_ideas = []
     for match in matches:
         match_id = match[0]
         match_score = match[1]
         if match_id != idea_id:
             relation = Relation()
-#            relation['targetId'] = match_id
             relation['weight'] = match_score
-#            matched_ideas.append(relation)
             matched_ideas.append((match_id, relation))
     #result = itertools.chain.from_iterable(matched_ideas)
     #return multipleToJson(result)
@@ -115,6 +115,8 @@ def add_suggested_relations():
     idea_id = request.args.get("idea_id")
     if idea_id == None:
         return "Must provide idea id to find relations!"
+    if idea_id not in sim_server.keys():
+        index_new_idea(idea_id)
     idea = _add_suggested_relations(idea_id)
     return toJson(idea)
 
@@ -123,17 +125,20 @@ def add_all_suggested_relations():
     all_ideas = mongo.db.ideas.find({})
     for idea in all_ideas:
         idea_id = idea["_id"]
+        if idea_id not in sim_server.keys():
+            index_new_idea(idea_id)
         _add_suggested_relations(idea_id)
     return multipleToJson(all_ideas)
 
+def index_new_idea(idea_id):
+    idea = mongo.db.ideas.find_one({"_id": idea_id})
+    corpus = [{'id': idea['_id'], 'tokens': utils.simple_preprocess(idea['text'])}]
+    sim_server.index(corpus)
+
 def _add_suggested_relations(idea_id):
     matched_ideas = compute_relations(idea_id)
-#    idea = mongo.db.ideas.find_and_modify(
-#        query = {"_id": idea_id},
-#        update = {"$addToSet": {"relations": matched_ideas}},
-#        new = True
-#    )
     idea = mongo.db.ideas.find_one({"_id": idea_id})
+
     if "relations" in idea:
         relations = idea["relations"]
     else:
@@ -143,8 +148,9 @@ def _add_suggested_relations(idea_id):
         if match_id not in relations:
             relations[match_id] = relation
             idea_is_updated = True
+#    idea_is_updated = True
+#    relations = {}
     if idea_is_updated:
-        #mongo.db.ideas.update({"_id": idea_id}, {"$set": {"relations": relations}})
         idea = mongo.db.ideas.find_and_modify(
             query = {"_id": idea_id},
             update = {"$set": {"relations": relations}},
@@ -219,6 +225,20 @@ def relation_feedback(): #arguments: relation_id, confirm, deny, user
         new = True
     )
     return toJson(relation)
+
+@app.route("/clear_all_relations")
+def clear_all_relations():
+    ideas = mongo.db.ideas.find({})
+    for idea in all_ideas:
+        idea_id = idea["_id"]
+        relations = {}
+        idea = mongo.db.ideas.find_and_modify(
+            query = {"_id": idea_id},
+            update = {"$set": {"relations": {}}},
+            new = True
+        )
+    return multipleToJson(ideas)
+
 
 def toJson(data):
     """Convert Mongo object(s) to JSON"""

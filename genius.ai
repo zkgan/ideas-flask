@@ -1,0 +1,47 @@
+Idea matching as a service: genius.ai
+
+Use cases: 
+Philips trouble ticket system
+Suggestion box websites
+Quora: find redundant questions
+Thought Streaming tool: finding related ideas
+Capital Sphere: finding related opportunities (companies looking for growth or buyout)
+MIT project hub: finding related/overlapping projects
+Crunchbase: finding related companies
+VC firm/MIT 100k: finding projects related to a new pitch
+Classroom/Lecture: find in real time when multiple people have related questions (and address them)
+
+Benchmarks:
+1. vs using Google custom search (Theoretically, should be able to do better than Google because data snowball. Once one connection is made: can find more connections.)
+
+API specs:
+
+update_database(...) : CRUD API
+
+compute_suggested_relations(...) (input list of IDs, compute relations, returns relations) : calls notify_user when done
+
+compute_suggested_relations(...) (input list of IDs, compute relations, returns processing queue ID) : calls notify_user when done
+
+compute_suggested_relations(...) (input text, compute relations, returns processing queue ID) : calls notify_user when done
+
+(private) notify_user (that processing is complete) (or results are ready)
+
+fetch_suggested_relations(processing_queue_ID): fetch results of compute_suggested_relations
+
+fetch_suggested_relations: returns all suggested relations
+
+
+API specs:
+
+compute_suggested_relations(...) (input list of IDs, compute relations, returns relations) : calls notify_user when done
+
+compute_suggested_relations(...) (input list of IDs, compute relations, returns processing queue ID) : calls notify_user when done
+
+compute_suggested_relations(...) (input text, compute relations, returns processing queue ID) : calls notify_user when done
+
+(private) notify_user (that processing is complete) (or results are ready)
+
+fetch_suggested_relations(processing_queue_ID): fetch results of compute_suggested_relations
+
+fetch_suggested_relations: returns all suggested relations
+
