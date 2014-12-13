@@ -51,8 +51,12 @@ class Relation(Document):
     default_values = {'confirms': 0, 'denies': 0, 'reviewed': False}
 
 @app.route("/")
-def init_sim_server():
-    return ''
+def reindex_sim_server():
+    cursor = mongo.db.ideas.find({})
+    corpus = [{'id': idea['_id'], 'tokens': utils.simple_preprocess(idea['text'])} for idea in cursor]
+
+    sim_server.index(corpus)
+    return 'indexing done'
 
 # create read update delete
 @app.route("/create_idea")
@@ -97,7 +101,7 @@ def read_ideas():
 
 def compute_relations(idea_id): # Computes relations for idea specified by idea_id
     # Now we have a working sim_server, find similar ideas!
-    matches = sim_server.find_similar(idea_id, min_score = 0.09)
+    matches = sim_server.find_similar(idea_id, min_score = 0.12, max_results=9)
     matched_ideas = []
     for match in matches:
         match_id = match[0]
@@ -199,10 +203,6 @@ def get_suggested_relations():
     print suggested_relations
     return toJson(suggested_relations)
 
-def auto_suggest_relations(): #argument: text
-    suggested_relation = mongo.db.relations.find_one()
-    return suggested_relation
-
 @app.route("/relation_feedback")
 def relation_feedback(): #arguments: relation_id, confirm, deny, user
     relation_id = request.args.get("relation_id")
@@ -229,7 +229,7 @@ def relation_feedback(): #arguments: relation_id, confirm, deny, user
 @app.route("/clear_all_relations")
 def clear_all_relations():
     ideas = mongo.db.ideas.find({})
-    for idea in all_ideas:
+    for idea in ideas:
         idea_id = idea["_id"]
         relations = {}
         idea = mongo.db.ideas.find_and_modify(
